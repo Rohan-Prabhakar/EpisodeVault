@@ -1,6 +1,6 @@
 # EpisodeVault: find out exactly why your robot model regressed.
 
-[![PyPI](https://img.shields.io/pypi/v/episodevault)]([https://pypi.org/project/episodevault/](https://pypi.org/project/episodevault/))
+[![PyPI](https://img.shields.io/pypi/v/episodevault)]([https://pypi.org/project/episodevault/])
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![LeRobot v3](https://img.shields.io/badge/LeRobot-v3-green.svg)](https://github.com/huggingface/lerobot)
