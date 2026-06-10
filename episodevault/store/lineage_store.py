@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,9 @@ class LineageStore:
         else:
             combined = table
 
-        pq.write_table(combined, self._lineage_path, compression="snappy")
+        tmp = self._lineage_path.with_suffix(".tmp")
+        pq.write_table(combined, tmp, compression="snappy")
+        os.replace(tmp, self._lineage_path)
 
     def dataset_version_for_model(self, model_version: str) -> str | None:
         if not self._lineage_path.exists():

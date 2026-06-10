@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -59,11 +60,10 @@ class VersionStore:
         else:
             combined = table
 
-        pq.write_table(combined, self._versions_path, compression="snappy")
+        self._atomic_write(self._versions_path, combined)
 
         meta = self._read_meta()
         meta["dataset_id"] = manifest.dataset_id
-        meta["version_count"] = meta.get("version_count", 0) + 1
         self._write_meta(meta)
 
         return version_id
@@ -106,9 +106,17 @@ class VersionStore:
         return versions[-1]["version_id"]
 
     def _next_version_id(self) -> str:
-        meta = self._read_meta()
-        n = meta.get("version_count", 0) + 1
+
+        if not self._versions_path.exists():
+            return "v1.0"
+        df = pq.read_table(self._versions_path, columns=["version_id"]).to_pandas()
+        n = df["version_id"].nunique() + 1
         return f"v{n}.0"
+
+    def _atomic_write(self, path: Path, table: pa.Table) -> None:
+        tmp = path.with_suffix(".tmp")
+        pq.write_table(table, tmp, compression="snappy")
+        os.replace(tmp, path)
 
     def _manifest_to_rows(
         self,
