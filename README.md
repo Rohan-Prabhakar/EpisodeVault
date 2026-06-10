@@ -1,4 +1,4 @@
-# EpisodeVault -- find out exactly why your robot model regressed.
+# EpisodeVault: find out exactly why your robot model regressed.
 
 [![PyPI](https://img.shields.io/pypi/v/episodevault)](https://pypi.org/project/episodevault/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
