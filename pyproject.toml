@@ -38,6 +38,9 @@ episodevault = "episodevault.cli.main:cli"
 where = ["."]
 include = ["episodevault*"]
 
+[tool.setuptools]
+license-files = []
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
