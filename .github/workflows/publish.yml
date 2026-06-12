@@ -1,7 +1,5 @@
 name: Publish to PyPI
 
-# Publishes on a version tag (e.g. v0.1.0) or a published GitHub Release.
-# Uses PyPI Trusted Publishing (OIDC) — no API tokens or repository secrets.
 on:
   push:
     tags:
@@ -49,11 +47,6 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Check distribution metadata
-        run: |
-          pip install twine
-          twine check dist/*
-
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -67,6 +60,8 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/project/episodevault/
+    permissions:
+      id-token: write
     steps:
       - name: Download distribution artifacts
         uses: actions/download-artifact@v4
@@ -75,9 +70,6 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          pip install twine
-          twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: false
