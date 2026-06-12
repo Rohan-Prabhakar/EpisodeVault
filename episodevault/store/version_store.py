@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,36 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from episodevault.models import DatasetManifest, EpisodeManifest, EpisodeQuality
+
+_DEFAULT_BRANCH = "main"
+_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)$")
+
+
+def _parse_version_id(version_id: str) -> tuple[int, int]:
+    """Split 'v2.1' into (major, minor); (0, 0) if it doesn't match."""
+    m = _VERSION_RE.match(version_id)
+    if not m:
+        return (0, 0)
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _union_manifests(base: DatasetManifest, incoming: DatasetManifest) -> DatasetManifest:
+    """Merge two manifests by episode_id (incoming wins on conflicts)."""
+    by_id: dict[str, EpisodeManifest] = {e.episode_id: e for e in base.episodes}
+    for e in incoming.episodes:
+        by_id[e.episode_id] = e
+    episodes = tuple(by_id.values())
+    return DatasetManifest(
+        dataset_id=base.dataset_id,
+        total_episodes=len(episodes),
+        total_frames=sum(e.frame_count for e in episodes),
+        fps=base.fps,
+        robot_type=base.robot_type,
+        modalities=tuple(sorted({m for e in episodes for m in e.modalities})),
+        tasks=tuple(sorted({e.task for e in episodes})),
+        episodes=episodes,
+        format_version=base.format_version,
+    )
 
 _SCHEMA = pa.schema([
     pa.field("version_id", pa.string()),
@@ -34,6 +65,7 @@ _SCHEMA = pa.schema([
     pa.field("quality", pa.string()),
     pa.field("source_hash", pa.string()),
     pa.field("raw_extras", pa.string()),
+    pa.field("metrics", pa.string()),
 ])
 
 
@@ -148,6 +180,7 @@ class VersionStore:
                 "quality": ep.quality.value,
                 "source_hash": ep.source_hash,
                 "raw_extras": json.dumps(ep.raw_extras),
+                "metrics": json.dumps(ep.metrics),
             })
         return rows
 
@@ -167,6 +200,11 @@ class VersionStore:
                 quality=EpisodeQuality(row["quality"]),
                 source_hash=row["source_hash"],
                 raw_extras=json.loads(row["raw_extras"]) if row["raw_extras"] else {},
+                metrics=(
+                    json.loads(row["metrics"])
+                    if "metrics" in row and pd.notna(row["metrics"]) and row["metrics"]
+                    else {}
+                ),
             )
             for _, row in df.iterrows()
         )

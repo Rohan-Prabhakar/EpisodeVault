@@ -48,6 +48,21 @@ def test_read_version_roundtrips_manifest(tmp_path):
     assert {e.task for e in recovered.episodes} == {e.task for e in manifest.episodes}
 
 
+def test_read_version_roundtrips_custom_metrics(tmp_path):
+    root = make_lerobot_v3_dataset(
+        tmp_path / "ds",
+        [{"task": "grasp", "task_index": 0, "frame_count": 40, "gripper": 0.5}],
+        include_actions=True,
+    )
+    manifest = parse(root)
+    store = VersionStore(tmp_path / "store")
+    vid = store.commit(manifest, "with metrics")
+    recovered = store.read_version(vid)
+
+    assert recovered.episodes[0].metrics == manifest.episodes[0].metrics
+    assert "action_smoothness" in recovered.episodes[0].metrics
+
+
 def test_read_version_raises_on_missing(tmp_path):
     store = VersionStore(tmp_path / "store")
     with pytest.raises(KeyError, match="v99.0"):

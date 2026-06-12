@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "episodevault"
-version = "0.1.1"
+version = "0.2.0"
 description = "Version control and lineage tracking for robot training episode data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+hub = [
+    "huggingface_hub>=0.23",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

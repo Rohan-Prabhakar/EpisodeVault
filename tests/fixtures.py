@@ -13,6 +13,7 @@ def make_lerobot_v3_dataset(
     episodes: list[dict],
     fps: int = 30,
     robot_type: str = "so101",
+    include_actions: bool = False,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     meta_dir = root / "meta"
@@ -62,14 +63,28 @@ def make_lerobot_v3_dataset(
     for i, ep in enumerate(episodes):
         frame_count = ep.get("frame_count", fps * 5)
         task_index = ep.get("task_index", 0)
+        # "jerky" episodes get a noisy action signal; otherwise actions ramp
+        # smoothly. "gripper" sets the fraction of frames the gripper is closed.
+        jerky = ep.get("jerky", False)
+        gripper_closed_frac = ep.get("gripper", 0.5)
         for f in range(frame_count):
-            all_rows.append({
+            row = {
                 "episode_index": i,
                 "frame_index": f,
                 "task_index": task_index,
                 "timestamp": f / fps,
                 "index": i * frame_count + f,
-            })
+            }
+            if include_actions:
+                base = f / max(frame_count - 1, 1)
+                if jerky:
+                    arm = [base + (0.5 if f % 2 else -0.5) for _ in range(5)]
+                else:
+                    arm = [base for _ in range(5)]
+                gripper = 1.0 if f >= frame_count * (1 - gripper_closed_frac) else 0.0
+                row["action"] = arm + [gripper]
+                row["observation.state"] = arm + [gripper]
+            all_rows.append(row)
 
     df = pd.DataFrame(all_rows)
     table = pa.Table.from_pandas(df)

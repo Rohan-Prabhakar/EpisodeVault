@@ -190,6 +190,65 @@ def test_parse_episodes_jsonl_empty_falls_back(tmp_path):
     assert len(manifest.episodes) >= 1
 
 
+def test_parse_computes_custom_quality_metrics(tmp_path):
+    episodes = [{"task": "grasp", "task_index": 0, "frame_count": 40, "gripper": 0.5}]
+    root = make_lerobot_v3_dataset(tmp_path / "ds", episodes, include_actions=True)
+    manifest = parse(root)
+
+    ep = manifest.episodes[0]
+    assert "action_smoothness" in ep.metrics
+    assert "gripper_closure_rate" in ep.metrics
+    assert 0.0 <= ep.metrics["action_smoothness"] <= 1.0
+    # Gripper closed for ~the last half of frames.
+    assert ep.metrics["gripper_closure_rate"] == pytest.approx(0.5, abs=0.05)
+
+
+def test_parse_custom_metric_registration(tmp_path):
+    from episodevault.parsers import lerobot
+
+    lerobot.register_quality_metric("frame_total", lambda df: float(len(df)))
+    try:
+        episodes = [{"task": "grasp", "task_index": 0, "frame_count": 40}]
+        root = make_lerobot_v3_dataset(tmp_path / "ds", episodes, include_actions=True)
+        manifest = parse(root)
+        assert manifest.episodes[0].metrics["frame_total"] == 40.0
+    finally:
+        lerobot.QUALITY_METRICS.pop("frame_total", None)
+
+
+def test_parse_metrics_empty_without_action_data(tmp_path):
+    episodes = [{"task": "grasp", "task_index": 0, "frame_count": 40}]
+    root = make_lerobot_v3_dataset(tmp_path / "ds", episodes)  # no actions
+    manifest = parse(root)
+    # Built-in metrics abstain (return None) when the action column is absent.
+    assert "action_smoothness" not in manifest.episodes[0].metrics
+
+
+def test_parse_hub_rejects_non_repo_id():
+    from episodevault.parsers.lerobot import parse_hub
+
+    with pytest.raises(ValueError, match="repo ID"):
+        parse_hub("not_a_repo_id")
+
+
+def test_parse_hub_downloads_and_parses(tmp_path, monkeypatch):
+    from episodevault.parsers import lerobot
+
+    local = make_lerobot_v3_dataset(
+        tmp_path / "hub_cache",
+        [{"task": "grasp", "task_index": 0, "frame_count": 90}],
+    )
+
+    def fake_download(repo_id, revision, cache_dir):
+        return local
+
+    monkeypatch.setattr(lerobot, "_download_hub_dataset", fake_download)
+
+    manifest = lerobot.parse_hub("lerobot/aloha_static_pro_pencil")
+    assert manifest.dataset_id == "lerobot/aloha_static_pro_pencil"
+    assert manifest.total_episodes == 1
+
+
 def test_parse_sync_score_tolerates_floating_point_drift(tmp_path):
     import pandas as pd
     import pyarrow as pa

@@ -4,7 +4,7 @@ import hashlib
 import json
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,57 @@ _SYNC_DRIFT_THRESHOLD_S = 0.005
 _SYNC_SCORE_DEGRADED = 0.95
 _HASH_SAMPLE_ROWS = 10
 _HF_REPO_ID_PATTERN = "/"
+
+
+# --- Custom quality metrics (feature: standardized "quality" metrics) -------
+#
+# A metric is a callable that receives one episode's per-frame DataFrame and
+# returns a float score (or None to abstain when the required columns are
+# absent). Metrics registered here are computed for every episode at parse time
+# and tracked across versions via EpisodeManifest.metrics.
+
+QualityMetricFn = Callable[[pd.DataFrame], "float | None"]
+QUALITY_METRICS: dict[str, QualityMetricFn] = {}
+
+
+def register_quality_metric(name: str, fn: QualityMetricFn) -> None:
+    """Register a custom per-episode quality metric, computed on parse."""
+    QUALITY_METRICS[name] = fn
+
+
+def _episode_action_matrix(df: pd.DataFrame) -> np.ndarray | None:
+    """Stack a list/array-valued 'action' column into an (n_frames, dim) array."""
+    if "action" not in df.columns:
+        return None
+    try:
+        arr = np.stack([np.asarray(a, dtype=np.float64) for a in df["action"]])
+    except (ValueError, TypeError):
+        return None
+    if arr.ndim != 2 or arr.shape[0] < 3:
+        return None
+    return arr
+
+
+def _metric_action_smoothness(df: pd.DataFrame) -> float | None:
+    """1 / (1 + mean jerk). 1.0 = perfectly smooth, →0 as actions get jerky."""
+    arr = _episode_action_matrix(df)
+    if arr is None:
+        return None
+    jerk = float(np.linalg.norm(np.diff(arr, n=2, axis=0), axis=1).mean())
+    return 1.0 / (1.0 + jerk)
+
+
+def _metric_gripper_closure_rate(df: pd.DataFrame) -> float | None:
+    """Fraction of frames where the gripper (last action dim) is closed (>0.5)."""
+    arr = _episode_action_matrix(df)
+    if arr is None:
+        return None
+    gripper = arr[:, -1]
+    return float((gripper > 0.5).mean())
+
+
+register_quality_metric("action_smoothness", _metric_action_smoothness)
+register_quality_metric("gripper_closure_rate", _metric_gripper_closure_rate)
 
 
 def parse(dataset_path: str | Path) -> DatasetManifest:
@@ -52,6 +103,51 @@ def parse(dataset_path: str | Path) -> DatasetManifest:
         tasks=tasks,
         episodes=episode_manifests,
     )
+
+
+def _download_hub_dataset(repo_id: str, revision: str | None, cache_dir: str | Path | None) -> Path:
+    """Download a LeRobot dataset from the HuggingFace Hub and return its local path.
+
+    Isolated so tests can monkeypatch it without hitting the network.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:  # pragma: no cover - depends on optional dep
+        raise RuntimeError(
+            "Diffing against the HuggingFace Hub requires the 'huggingface_hub' "
+            "package. Install it with: pip install huggingface_hub"
+        ) from exc
+
+    local = snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        revision=revision,
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+    )
+    return Path(local)
+
+
+def parse_hub(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    cache_dir: str | Path | None = None,
+) -> DatasetManifest:
+    """Download a Hub-hosted LeRobot dataset and parse it into a DatasetManifest.
+
+    Pairs with parse() so a local dataset can be diffed against its Hub origin
+    using the existing format-agnostic diff engine.
+    """
+    if _HF_REPO_ID_PATTERN not in repo_id:
+        raise ValueError(
+            f"'{repo_id}' does not look like a HuggingFace repo ID "
+            "(expected the form 'owner/name')."
+        )
+    local_root = _download_hub_dataset(repo_id, revision, cache_dir)
+    manifest = parse(local_root)
+    # Preserve the Hub identity rather than the temp cache directory name.
+    object.__setattr__(manifest, "dataset_id", repo_id)
+    return manifest
 
 
 def _reject_hub_path(dataset_path: str | Path, root: Path) -> None:
@@ -251,6 +347,7 @@ def _build_episode_manifest(
 
     quality = _classify_quality(duration_s, frame_count)
     camera_sync_score = _compute_sync_score(root, episode_index, fps)
+    metrics = _compute_custom_metrics(root, episode_index)
     robot_type = info.get("robot_type", ep_row.get("robot_type", "unknown"))
     source_hash = _compute_episode_hash(
         root,
@@ -289,7 +386,46 @@ def _build_episode_manifest(
         quality=quality,
         source_hash=source_hash,
         raw_extras=raw_extras,
+        metrics=metrics,
     )
+
+
+def _load_episode_frames(root: Path, episode_index: int) -> pd.DataFrame | None:
+    """Load all per-frame rows for one episode from the data Parquet files."""
+    data_dir = root / "data"
+    if not data_dir.exists():
+        return None
+    for pf in sorted(data_dir.glob("**/*.parquet")):
+        try:
+            schema = pq.read_schema(pf)
+            if "episode_index" not in schema.names:
+                continue
+            table = pq.read_table(
+                pf, filters=[("episode_index", "=", episode_index)]
+            )
+            if table.num_rows == 0:
+                continue
+            return table.to_pandas()
+        except Exception:
+            continue
+    return None
+
+
+def _compute_custom_metrics(root: Path, episode_index: int) -> dict[str, float]:
+    if not QUALITY_METRICS:
+        return {}
+    df = _load_episode_frames(root, episode_index)
+    if df is None or df.empty:
+        return {}
+    out: dict[str, float] = {}
+    for name, fn in QUALITY_METRICS.items():
+        try:
+            value = fn(df)
+        except Exception:
+            continue
+        if value is not None:
+            out[name] = round(float(value), 4)
+    return out
 
 
 def _is_na(v: object) -> bool:

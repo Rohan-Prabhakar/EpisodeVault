@@ -25,6 +25,9 @@ class EpisodeManifest:
     quality: EpisodeQuality
     source_hash: str
     raw_extras: dict[str, Any] = field(default_factory=dict)
+    # User-defined quality metrics (e.g. action_smoothness, gripper_closure_rate)
+    # computed at parse time and tracked across versions.
+    metrics: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +43,7 @@ class EpisodeManifest:
             "quality": self.quality.value,
             "source_hash": self.source_hash,
             "raw_extras": self.raw_extras,
+            "metrics": self.metrics,
         }
 
 
@@ -73,3 +77,14 @@ class DatasetManifest:
         if not self.episodes:
             return 0.0
         return sum(e.camera_sync_score for e in self.episodes) / len(self.episodes)
+
+    @property
+    def avg_metrics(self) -> dict[str, float]:
+        """Mean of each custom quality metric across episodes that report it."""
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for e in self.episodes:
+            for name, value in e.metrics.items():
+                sums[name] = sums.get(name, 0.0) + value
+                counts[name] = counts.get(name, 0) + 1
+        return {name: sums[name] / counts[name] for name in sums}
