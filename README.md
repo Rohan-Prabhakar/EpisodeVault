@@ -5,7 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![LeRobot v3](https://img.shields.io/badge/LeRobot-v3-green.svg)](https://github.com/huggingface/lerobot)
 
----
 
 ## The problem
 
@@ -13,7 +12,6 @@ Every robotics ML engineer has retrained a model and watched performance drop wi
 
 EpisodeVault fills that gap.
 
----
 
 ## What EpisodeVault does
 
@@ -41,7 +39,6 @@ Regression candidates (ranked by magnitude; correlate with your eval):
     demonstrations. Run score_lerobot_episodes to identify low-quality additions.
 ```
 
----
 
 ## Install
 
@@ -51,7 +48,6 @@ pip install episodevault
 
 Requires Python 3.10+. Key dependencies: `pyarrow`, `pandas`, `duckdb`, `click`, `rich`, `pydantic`.
 
----
 
 ## Quickstart
 
@@ -83,7 +79,6 @@ episodevault blame model_v3
 
 `track` initializes a `.episodevault/` store inside your dataset directory. `commit` snapshots the episode manifest (not raw sensor data -- fast). `diff` computes task distribution shift and quality deltas between any two versions. `blame` looks up which dataset version trained a given model and diffs it against the version before.
 
----
 
 ## Python API
 
@@ -101,11 +96,10 @@ ev.log_training_run(
 
 One call. That's all `blame` needs.
 
----
 
 ## Custom quality metrics
 
-EpisodeVault ships two built-in per-episode metrics — `action_smoothness` (1 / (1 + mean jerk); 1.0 is perfectly smooth) and `gripper_closure_rate` — but the point is that **you define your own**. A quality metric is any function that takes one episode's per-frame DataFrame and returns a float (or `None` to abstain when the columns it needs aren't present). Register it once, and EpisodeVault computes it for every episode at parse time, stores it in the version snapshot, and diffs it across versions automatically.
+EpisodeVault ships two built-in per-episode metrics: `action_smoothness` (1 / (1 + mean jerk); 1.0 is perfectly smooth) and `gripper_closure_rate`. The point is that **you define your own**. A quality metric is any function that takes one episode's per-frame DataFrame and returns a float (or `None` to abstain when the columns it needs are not present). Register it once, and EpisodeVault computes it for every episode at parse time, stores it in the version snapshot, and diffs it across versions automatically.
 
 ```python
 from episodevault.parsers.lerobot import register_quality_metric
@@ -122,11 +116,10 @@ def wrist_travel(frames):
 register_quality_metric("wrist_travel", wrist_travel)
 ```
 
-After registering, `episodevault commit` records `wrist_travel` for every episode, `episodevault diff` reports how its dataset-wide average shifted between versions, and `episodevault anomalies` will flag episodes whose `wrist_travel` is a statistical outlier — no extra wiring. Each metric value is also available programmatically on `episode.metrics`.
+After registering, `episodevault commit` records `wrist_travel` for every episode, `episodevault diff` reports how its dataset-wide average shifted between versions, and `episodevault anomalies` will flag episodes whose `wrist_travel` is a statistical outlier. No extra wiring. Each metric value is also available programmatically on `episode.metrics`.
 
 Register your metrics in a small Python module (or your `conftest`/startup script) that runs before you invoke the parser. The frame DataFrame contains whatever columns your LeRobot data Parquet has — typically `action`, `observation.state`, `timestamp` — with list-valued columns (e.g. `action`) stacked per row.
 
----
 
 ## Anomaly detection
 
@@ -145,7 +138,6 @@ Register your metrics in a small Python module (or your `conftest`/startup scrip
 
 It combines a robust (median/MAD) z-score over duration, frame count, camera sync, and every custom metric with rule-based checks (corrupted quality, severely desynced cameras). Pass `--version v2.0` to inspect a committed snapshot instead of re-parsing the working tree.
 
----
 
 ## Version history tree
 
@@ -157,7 +149,7 @@ my_dataset
 ├── v2.0  add place task       (3 eps · 2026-06-11 20:31)
 └── v3.0  kitchen heavy run    (6 eps · 2026-06-11 20:45)
 
-Diff two versions? Enter e.g. v1.0 v2.0 — or press Enter to skip.
+Diff two versions? Enter e.g. v1.0 v2.0, or press Enter to skip.
 > v1.0 v3.0
 
 Dataset diff: v1.0 → v3.0
@@ -166,20 +158,18 @@ Dataset diff: v1.0 → v3.0
 
 Press Enter to skip the diff and just view the tree. Add `--html report.html` to also export a full HTML report for the chosen diff.
 
----
 
 ## Shareable HTML reports
 
 `episodevault diff v1.0 v2.0 --html audit.html` writes a self-contained HTML report containing:
 
-- **Version history graph** — a visual timeline of all commits so recipients can see where this diff sits
-- **Distribution and quality bar charts** — before vs. after, inline SVG
-- **Custom metric shifts** — every metric you've registered, diffed across versions
-- **Flagged episodes table** — anomalies detected in the after version
+- **Version history graph**: a visual timeline of all commits so recipients can see where this diff sits
+- **Distribution and quality bar charts**: before vs. after, inline SVG
+- **Custom metric shifts**: every metric you've registered, diffed across versions
+- **Flagged episodes table**: anomalies detected in the after version
 
 No external scripts, fonts, or network requests — safe to email or archive for non-technical stakeholders. `diff-hub` and `tree` both support `--html` too.
 
----
 
 ## Diff against the HuggingFace Hub
 
@@ -191,7 +181,6 @@ episodevault diff-hub v2.0 lerobot/aloha_static_pro_pencil --revision main --htm
 
 Requires the optional `huggingface_hub` package (`pip install huggingface_hub`).
 
----
 
 ## Compatibility
 
@@ -206,7 +195,6 @@ Tested against real HuggingFace LeRobot v3 datasets:
 
 Parse time is for the episode manifest only. Raw sensor data (video, joint trajectories) is never loaded.
 
----
 
 ## How it works
 
@@ -215,7 +203,6 @@ Parse time is for the episode manifest only. Raw sensor data (video, joint traje
 - Diff engine computes task distribution shift and quality deltas between any two snapshots -- regression candidates are ranked by a normalized severity score and the top few are surfaced, not asserted as proven causes.
 
 
----
 
 ## Credits
 
@@ -224,7 +211,6 @@ Parse time is for the episode manifest only. Raw sensor data (video, joint traje
 - [score_lerobot_episodes](https://github.com/RobotData/score-lerobot-episodes) by RobotData for quality signal methodology.
 - [Evidently AI](https://github.com/evidentlyai/evidently) for drift detection methodology that informed the distribution shift logic.
 
----
 
 ## License
 
