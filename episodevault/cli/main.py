@@ -1,13 +1,10 @@
 from __future__ import annotations
-
 import sys
 from pathlib import Path
-
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
-
 from episodevault.diff.engine import detect_anomalies
 from episodevault.diff.engine import diff as compute_diff
 from episodevault.parsers.lerobot import parse as parse_lerobot
@@ -17,66 +14,94 @@ from episodevault.store.version_store import VersionStore
 
 _console = Console(force_terminal=True)
 
-def _resolve_store(dataset_path: Path) -> Path:
-    return dataset_path / ".episodevault"
+def _resolve_store(dataset_uri: str) -> Path:
+    """Get the .episodevault store directory for a dataset."""
+    if _is_cloud_uri(dataset_uri):
+        return Path(".episodevault")
+    return Path(dataset_uri) / ".episodevault"
 
+def _is_cloud_uri(uri: str) -> bool:
+    """Check if a string is a cloud URI (s3://, gs://, etc.)."""
+    return uri.startswith(("s3://", "gs://", "az://", "hf://", "memory://"))
 
 @click.group()
 def cli() -> None:
+    """EpisodeVault: Track, diff, and debug robotics datasets at the episode level."""
     pass
 
-
 @cli.command()
-@click.argument("dataset_path")
-def track(dataset_path: str) -> None:
-    """Initialize version tracking for a local LeRobot dataset."""
-    if "/" in dataset_path and not Path(dataset_path).exists():
-        local_name = dataset_path.replace("/", "__")
+@click.argument("dataset_uri")
+def track(dataset_uri: str) -> None:
+    """Initialize version tracking for a LeRobot dataset (local or cloud)."""
+    if _is_cloud_uri(dataset_uri):
+        _console.print(f"[green]Tracking[/green] {dataset_uri}")
+        _console.print("[yellow]Note:[/yellow] Cloud datasets are tracked by URI. Use 'commit' to snapshot.")
+        store_path = Path(".episodevault")
+        store_path.mkdir(parents=True, exist_ok=True)
+        (store_path / "cloud_uri.txt").write_text(dataset_uri)
+        _console.print(f"Store initialised at {store_path}")
+        return
+
+    if "/" in dataset_uri and not Path(dataset_uri).exists():
+        local_name = dataset_uri.replace("/", "__")
         _console.print(
-            f"[red]error:[/red] '{dataset_path}' looks like a HuggingFace repo ID, "
+            f"[red]error:[/red] '{dataset_uri}' looks like a HuggingFace repo ID, "
             "not a local path."
         )
         _console.print(
             f"Download first with:\n"
-            f"  huggingface-cli download --repo-type dataset {dataset_path} "
+            f"  huggingface-cli download --repo-type dataset {dataset_uri} "
             f"--local-dir ./{local_name}"
         )
         sys.exit(1)
 
-    root = Path(dataset_path)
+    root = Path(dataset_uri)
     if not root.exists():
-        _console.print(f"[red]error:[/red] path '{dataset_path}' does not exist.")
+        _console.print(f"[red]error:[/red] path '{dataset_uri}' does not exist.")
         sys.exit(1)
 
-    store_path = _resolve_store(root)
+    store_path = _resolve_store(dataset_uri)
     store_path.mkdir(parents=True, exist_ok=True)
     (store_path / ".gitignore").write_text("*.parquet\n")
     _console.print(f"[green]Tracking[/green] {root.resolve()}")
     _console.print(f"Store initialised at {store_path}")
 
-
 @cli.command()
-@click.argument("dataset_path", type=click.Path(exists=True))
+@click.argument("dataset_uri")
 @click.option("-m", "--message", required=True, help="Commit message")
-def commit(dataset_path: str, message: str) -> None:
+def commit(dataset_uri: str, message: str) -> None:
     """Snapshot the current episode manifest as a new version."""
-    root = Path(dataset_path)
-    store_path = _resolve_store(root)
-
-    if not store_path.exists():
-        _console.print(
-            "[red]error:[/red] dataset not tracked. Run `episodevault track` first."
-        )
-        sys.exit(1)
+    if _is_cloud_uri(dataset_uri):
+        store_path = Path(".episodevault")
+        if not store_path.exists():
+            _console.print("[red]error:[/red] dataset not tracked. Run `episodevault track` first.")
+            sys.exit(1)
+        
+        stored_uri = (store_path / "cloud_uri.txt").read_text().strip()
+        if stored_uri != dataset_uri:
+            _console.print(f"[red]error:[/red] tracked URI '{stored_uri}' does not match '{dataset_uri}'.")
+            sys.exit(1)
+    else:
+        root = Path(dataset_uri)
+        if not root.exists():
+            _console.print(f"[red]error:[/red] path '{dataset_uri}' does not exist.")
+            sys.exit(1)
+        
+        store_path = _resolve_store(dataset_uri)
+        if not store_path.exists():
+            _console.print(
+                "[red]error:[/red] dataset not tracked. Run `episodevault track` first."
+            )
+            sys.exit(1)
 
     _console.print("Parsing dataset…")
     try:
-        manifest = parse_lerobot(root)
+        manifest = parse_lerobot(dataset_uri)
     except (FileNotFoundError, ValueError) as exc:
         _console.print(f"[red]error:[/red] {exc}")
         sys.exit(1)
 
-    store = VersionStore(store_path)
+    store = VersionStore(_resolve_store(dataset_uri))
     version_id = store.commit(manifest, message)
 
     _console.print(f"[green]Committed[/green] {version_id}  {message}")
@@ -86,20 +111,17 @@ def commit(dataset_path: str, message: str) -> None:
         f"{manifest.robot_type}"
     )
 
-
 @cli.command(name="diff")
 @click.argument("version_before")
 @click.argument("version_after")
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
+@click.argument("dataset_uri", default=".")
 @click.option("--html", "html_out", type=click.Path(), default=None,
               help="Write a self-contained HTML report to this path.")
-def diff_cmd(version_before: str, version_after: str, dataset_path: str,
+def diff_cmd(version_before: str, version_after: str, dataset_uri: str,
              html_out: str | None) -> None:
     """Compare two committed versions — task shifts, quality deltas, regression hints."""
-    root = Path(dataset_path)
-    store_path = _resolve_store(root)
+    store_path = _resolve_store(dataset_uri)
     store = VersionStore(store_path)
-
     try:
         manifest_before = store.read_version(version_before)
         manifest_after = store.read_version(version_after)
@@ -121,20 +143,18 @@ def diff_cmd(version_before: str, version_after: str, dataset_path: str,
         Path(html_out).write_text(report, encoding="utf-8")
         _console.print(f"\n[green]HTML report written to[/green] {html_out}")
 
-
 @cli.command(name="diff-hub")
 @click.argument("version_local")
 @click.argument("repo_id")
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
+@click.argument("dataset_uri", default=".")
 @click.option("--revision", default=None, help="Hub branch, tag, or commit SHA.")
 @click.option("--html", "html_out", type=click.Path(), default=None,
               help="Write a self-contained HTML report to this path.")
-def diff_hub_cmd(version_local: str, repo_id: str, dataset_path: str,
+def diff_hub_cmd(version_local: str, repo_id: str, dataset_uri: str,
                  revision: str | None, html_out: str | None) -> None:
     """Diff a local version against a dataset on the HuggingFace Hub."""
-    root = Path(dataset_path)
-    store = VersionStore(_resolve_store(root))
-
+    store_path = _resolve_store(dataset_uri)
+    store = VersionStore(store_path)
     try:
         manifest_local = store.read_version(version_local)
     except KeyError as exc:
@@ -159,17 +179,14 @@ def diff_hub_cmd(version_local: str, repo_id: str, dataset_path: str,
         Path(html_out).write_text(report, encoding="utf-8")
         _console.print(f"\n[green]HTML report written to[/green] {html_out}")
 
-
 @cli.command()
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
+@click.argument("dataset_uri", default=".")
 @click.option("--version", "version_id", default=None,
               help="Inspect a committed version instead of re-parsing the dataset.")
-def anomalies(dataset_path: str, version_id: str | None) -> None:
+def anomalies(dataset_uri: str, version_id: str | None) -> None:
     """Flag outlier episodes to prune before training."""
-    root = Path(dataset_path)
-
     if version_id:
-        store = VersionStore(_resolve_store(root))
+        store = VersionStore(_resolve_store(dataset_uri))
         try:
             manifest = store.read_version(version_id)
         except KeyError as exc:
@@ -177,7 +194,7 @@ def anomalies(dataset_path: str, version_id: str | None) -> None:
             sys.exit(1)
     else:
         try:
-            manifest = parse_lerobot(root)
+            manifest = parse_lerobot(dataset_uri)
         except (FileNotFoundError, ValueError) as exc:
             _console.print(f"[red]error:[/red] {exc}")
             sys.exit(1)
@@ -198,17 +215,14 @@ def anomalies(dataset_path: str, version_id: str | None) -> None:
     _console.print(f"[yellow]{len(found)}[/yellow] anomalous episode(s):")
     _console.print(table)
 
-
 @cli.command()
 @click.argument("model_version")
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
-def blame(model_version: str, dataset_path: str) -> None:
+@click.argument("dataset_uri", default=".")
+def blame(model_version: str, dataset_uri: str) -> None:
     """Show which dataset version a model was trained on, and diff it against the prior."""
-    root = Path(dataset_path)
-    store_path = _resolve_store(root)
+    store_path = _resolve_store(dataset_uri)
     lineage = LineageStore(store_path)
     store = VersionStore(store_path)
-
     dataset_version = lineage.dataset_version_for_model(model_version)
     if dataset_version is None:
         _console.print(
@@ -245,32 +259,33 @@ def blame(model_version: str, dataset_path: str) -> None:
     result = compute_diff(manifest_before, manifest_after)
     _console.print(result.format())
 
-
 @cli.command()
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
+@click.argument("dataset_uri", default=".")
 @click.option("--html", "html_out", type=click.Path(), default=None,
               help="Write a self-contained HTML report for the selected diff.")
-def tree(dataset_path: str, html_out: str | None) -> None:
+def tree(dataset_uri: str, html_out: str | None) -> None:
     """Render version history as a tree, then optionally jump to a diff."""
     import datetime
-    root = Path(dataset_path)
-    store = VersionStore(_resolve_store(root))
+    
+    store_path = _resolve_store(dataset_uri)
+    dataset_name = dataset_uri.split("/")[-1] if "/" in dataset_uri else dataset_uri
+    
+    store = VersionStore(store_path)
     versions = store.list_versions()
-
     if not versions:
         _console.print("No commits yet.")
         return
 
     version_ids = [v["version_id"] for v in versions]
 
-    t = Tree(f"[bold]{root.name}[/bold]")
+    t = Tree(f"[bold]{dataset_name}[/bold]")
     for v in versions:
         ts = datetime.datetime.fromtimestamp(
             v["committed_at"]
         ).strftime("%Y-%m-%d %H:%M")
         t.add(
-            f"[green]{v['version_id']}[/green]  "
-            f"{v['commit_message']}  "
+            f"[green]{v['version_id']}[/green]   "
+            f"{v['commit_message']}   "
             f"[dim]({v['total_episodes']} eps · {ts})[/dim]"
         )
     _console.print(t)
@@ -279,7 +294,7 @@ def tree(dataset_path: str, html_out: str | None) -> None:
         return
 
     _console.print(
-        "\n[dim]Diff two versions? Enter e.g. [bold]v1.0 v2.0[/bold]"
+        "\n[dim]Diff two versions? Enter e.g. [bold]v1.0 v2.0[/bold] "
         " — or press Enter to skip.[/dim]"
     )
     raw = click.prompt("", default="", show_default=False).strip()
@@ -322,16 +337,13 @@ def tree(dataset_path: str, html_out: str | None) -> None:
         Path(html_out).write_text(report, encoding="utf-8")
         _console.print(f"\n[green]HTML report written to[/green] {html_out}")
 
-
 @cli.command()
-@click.argument("dataset_path", type=click.Path(exists=True), default=".")
-def log(dataset_path: str) -> None:
+@click.argument("dataset_uri", default=".")
+def log(dataset_uri: str) -> None:
     """List all committed versions in chronological order."""
-    root = Path(dataset_path)
-    store_path = _resolve_store(root)
+    store_path = _resolve_store(dataset_uri)
     store = VersionStore(store_path)
     versions = store.list_versions()
-
     if not versions:
         _console.print("No commits yet.")
         return

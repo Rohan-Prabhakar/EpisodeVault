@@ -5,7 +5,7 @@ import warnings
 from pathlib import Path
 
 import pytest
-
+import fsspec
 from episodevault.models import EpisodeQuality
 from episodevault.parsers.lerobot import parse
 from tests.fixtures import make_lerobot_v3_dataset
@@ -265,3 +265,59 @@ def test_parse_sync_score_tolerates_floating_point_drift(tmp_path):
 
     manifest = parse(root)
     assert manifest.episodes[0].camera_sync_score >= 0.95
+
+
+
+def _copy_local_to_fsspec(local_path: Path, fs: fsspec.AbstractFileSystem, fs_path: str):
+    """Helper to copy a local directory tree into an fsspec filesystem."""
+    fs.mkdir(fs_path)
+    for item in local_path.iterdir():
+        if item.is_dir():
+            _copy_local_to_fsspec(item, fs, f"{fs_path}/{item.name}")
+        else:
+            fs.put_file(str(item), f"{fs_path}/{item.name}")
+
+def test_parse_from_fsspec_memory_fs(tmp_path):
+    """Test parsing a dataset from an fsspec memory filesystem (simulates S3/GCS)."""
+    episodes = [{"task": "cloud_task", "task_index": 0, "frame_count": 60}]
+    local_root = make_lerobot_v3_dataset(tmp_path / "local_ds", episodes, fps=30)
+    
+    mem_fs = fsspec.filesystem("memory")
+    mem_root = "/cloud_dataset"
+    
+    if mem_fs.exists(mem_root):
+        mem_fs.rm(mem_root, recursive=True)
+        
+    _copy_local_to_fsspec(local_root, mem_fs, mem_root)
+    
+    manifest = parse("memory:///cloud_dataset")
+    
+    assert manifest.total_episodes == 1
+    assert manifest.episodes[0].task == "cloud_task"
+    assert manifest.episodes[0].frame_count == 60
+    assert manifest.robot_type == "so101"
+
+def test_parse_from_fsspec_memory_fs_with_custom_metrics(tmp_path):
+    """Ensure custom quality metrics are computed correctly when reading from cloud storage."""
+    episodes = [{"task": "grasp", "task_index": 0, "frame_count": 40, "gripper": 0.5}]
+    local_root = make_lerobot_v3_dataset(
+        tmp_path / "local_ds_metrics", episodes, fps=30, include_actions=True
+    )
+    
+    mem_fs = fsspec.filesystem("memory")
+    mem_root = "/cloud_metrics_ds"
+    if mem_fs.exists(mem_root):
+        mem_fs.rm(mem_root, recursive=True)
+    _copy_local_to_fsspec(local_root, mem_fs, mem_root)
+    
+    manifest = parse("memory:///cloud_metrics_ds")
+    ep = manifest.episodes[0]
+    
+    assert "action_smoothness" in ep.metrics
+    assert "gripper_closure_rate" in ep.metrics
+    assert ep.metrics["gripper_closure_rate"] == pytest.approx(0.5, abs=0.05)
+
+def test_parse_rejects_invalid_cloud_uri(tmp_path):
+    """Ensure we still reject HuggingFace repo IDs even when checking URIs."""
+    with pytest.raises(ValueError, match="looks like a HuggingFace repo ID"):
+        parse("lerobot/aloha_static_pro_pencil")

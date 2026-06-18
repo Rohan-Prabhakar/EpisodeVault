@@ -17,9 +17,9 @@ def make_lerobot_v3_dataset(
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     meta_dir = root / "meta"
-    meta_dir.mkdir()
+    meta_dir.mkdir(exist_ok=True)
     data_dir = root / "data" / "chunk-000"
-    data_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     info = {
         "codebase_version": "v3.0",

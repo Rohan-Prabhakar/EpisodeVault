@@ -1,15 +1,13 @@
 from __future__ import annotations
-
 import hashlib
 import json
 import warnings
 from pathlib import Path
 from typing import Any, Callable
-
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-
+import fsspec
 from episodevault.models import DatasetManifest, EpisodeManifest, EpisodeQuality
 
 _MIN_EPISODE_DURATION_S = 0.5
@@ -18,22 +16,13 @@ _SYNC_SCORE_DEGRADED = 0.95
 _HASH_SAMPLE_ROWS = 10
 _HF_REPO_ID_PATTERN = "/"
 
-
 # --- Custom quality metrics (feature: standardized "quality" metrics) -------
-#
-# A metric is a callable that receives one episode's per-frame DataFrame and
-# returns a float score (or None to abstain when the required columns are
-# absent). Metrics registered here are computed for every episode at parse time
-# and tracked across versions via EpisodeManifest.metrics.
-
 QualityMetricFn = Callable[[pd.DataFrame], "float | None"]
 QUALITY_METRICS: dict[str, QualityMetricFn] = {}
-
 
 def register_quality_metric(name: str, fn: QualityMetricFn) -> None:
     """Register a custom per-episode quality metric, computed on parse."""
     QUALITY_METRICS[name] = fn
-
 
 def _episode_action_matrix(df: pd.DataFrame) -> np.ndarray | None:
     """Stack a list/array-valued 'action' column into an (n_frames, dim) array."""
@@ -47,7 +36,6 @@ def _episode_action_matrix(df: pd.DataFrame) -> np.ndarray | None:
         return None
     return arr
 
-
 def _metric_action_smoothness(df: pd.DataFrame) -> float | None:
     """1 / (1 + mean jerk). 1.0 = perfectly smooth, →0 as actions get jerky."""
     arr = _episode_action_matrix(df)
@@ -55,7 +43,6 @@ def _metric_action_smoothness(df: pd.DataFrame) -> float | None:
         return None
     jerk = float(np.linalg.norm(np.diff(arr, n=2, axis=0), axis=1).mean())
     return 1.0 / (1.0 + jerk)
-
 
 def _metric_gripper_closure_rate(df: pd.DataFrame) -> float | None:
     """Fraction of frames where the gripper (last action dim) is closed (>0.5)."""
@@ -65,26 +52,34 @@ def _metric_gripper_closure_rate(df: pd.DataFrame) -> float | None:
     gripper = arr[:, -1]
     return float((gripper > 0.5).mean())
 
-
 register_quality_metric("action_smoothness", _metric_action_smoothness)
 register_quality_metric("gripper_closure_rate", _metric_gripper_closure_rate)
 
+# --- Cloud-aware parsing ----------------------------------------------------
 
-def parse(dataset_path: str | Path) -> DatasetManifest:
-    root = Path(dataset_path)
+def _get_fs_and_path(dataset_uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
+    """Convert a URI (s3://, gs://, file://, memory://, or local path) to fsspec filesystem and path."""
+    fs, path = fsspec.core.url_to_fs(dataset_uri)
+    path = path.rstrip("/")
+    return fs, path
 
-    _reject_hub_path(dataset_path, root)
-    _assert_lerobot_v3(root)
+def parse(dataset_uri: str | Path) -> DatasetManifest:
+    """Parse a LeRobot dataset from any supported URI (local, s3://, gs://, hf://, memory://)."""
+    dataset_uri = str(dataset_uri)
+    _reject_hub_path(dataset_uri)
+    
+    fs, root_path = _get_fs_and_path(dataset_uri)
+    _assert_lerobot_v3(fs, root_path)
 
-    info = _read_info(root)
-    episodes_meta = _read_episodes_meta(root, info)
-    tasks_meta = _read_tasks_meta(root)
+    info = _read_info(fs, root_path)
+    episodes_meta = _read_episodes_meta(fs, root_path, info)
+    tasks_meta = _read_tasks_meta(fs, root_path)
 
     if not tasks_meta:
         tasks_meta = _infer_tasks_from_episodes(episodes_meta)
 
     episode_manifests = tuple(
-        _build_episode_manifest(root, ep_row, info, tasks_meta)
+        _build_episode_manifest(fs, root_path, ep_row, info, tasks_meta)
         for _, ep_row in episodes_meta.iterrows()
     )
 
@@ -93,8 +88,10 @@ def parse(dataset_path: str | Path) -> DatasetManifest:
     modalities = tuple(sorted(info.get("features", {}).keys()))
     tasks = tuple(sorted({e.task for e in episode_manifests}))
 
+    dataset_id = root_path.split("/")[-1] if "/" in root_path else root_path
+
     return DatasetManifest(
-        dataset_id=root.name,
+        dataset_id=dataset_id,
         total_episodes=info["total_episodes"],
         total_frames=info["total_frames"],
         fps=info["fps"],
@@ -104,15 +101,11 @@ def parse(dataset_path: str | Path) -> DatasetManifest:
         episodes=episode_manifests,
     )
 
-
 def _download_hub_dataset(repo_id: str, revision: str | None, cache_dir: str | Path | None) -> Path:
-    """Download a LeRobot dataset from the HuggingFace Hub and return its local path.
-
-    Isolated so tests can monkeypatch it without hitting the network.
-    """
+    """Download a LeRobot dataset from the HuggingFace Hub and return its local path."""
     try:
         from huggingface_hub import snapshot_download
-    except ImportError as exc:  # pragma: no cover - depends on optional dep
+    except ImportError as exc:
         raise RuntimeError(
             "Diffing against the HuggingFace Hub requires the 'huggingface_hub' "
             "package. Install it with: pip install huggingface_hub"
@@ -126,50 +119,41 @@ def _download_hub_dataset(repo_id: str, revision: str | None, cache_dir: str | P
     )
     return Path(local)
 
-
 def parse_hub(
     repo_id: str,
     *,
     revision: str | None = None,
     cache_dir: str | Path | None = None,
 ) -> DatasetManifest:
-    """Download a Hub-hosted LeRobot dataset and parse it into a DatasetManifest.
-
-    Pairs with parse() so a local dataset can be diffed against its Hub origin
-    using the existing format-agnostic diff engine.
-    """
+    """Download a Hub-hosted LeRobot dataset and parse it into a DatasetManifest."""
     if _HF_REPO_ID_PATTERN not in repo_id:
         raise ValueError(
             f"'{repo_id}' does not look like a HuggingFace repo ID "
             "(expected the form 'owner/name')."
         )
     local_root = _download_hub_dataset(repo_id, revision, cache_dir)
-    manifest = parse(local_root)
-    # Preserve the Hub identity rather than the temp cache directory name.
+    manifest = parse(str(local_root))
     object.__setattr__(manifest, "dataset_id", repo_id)
     return manifest
 
-
-def _reject_hub_path(dataset_path: str | Path, root: Path) -> None:
-    # Check the original, unnormalized input: Path() rewrites "/" to "\" on
-    # Windows, which would otherwise hide a HuggingFace repo ID like
-    # "lerobot/aloha_static_pro_pencil" from the "/" heuristic below.
-    raw = str(dataset_path)
-    if _HF_REPO_ID_PATTERN in raw and not root.exists():
+def _reject_hub_path(dataset_uri: str) -> None:
+    """Reject HuggingFace repo IDs passed as dataset paths."""
+    allowed_prefixes = ("s3://", "gs://", "az://", "file://", "memory://", "/")
+    if _HF_REPO_ID_PATTERN in dataset_uri and not dataset_uri.startswith(allowed_prefixes):
         raise ValueError(
-            f"'{raw}' looks like a HuggingFace repo ID, not a local path. "
-            "EpisodeVault requires a local dataset. "
-            "Download first with: huggingface-cli download --repo-type dataset "
-            f"{raw} --local-dir ./{raw.replace('/', '__')}"
+            f"'{dataset_uri}' looks like a HuggingFace repo ID, not a URI. "
+            "Use 'episodevault diff-hub' for Hub datasets, or provide a full URI."
         )
 
-
-def _assert_lerobot_v3(root: Path) -> None:
-    info_path = root / "meta" / "info.json"
-    if not info_path.exists():
+def _assert_lerobot_v3(fs: fsspec.AbstractFileSystem, root_path: str) -> None:
+    """Verify the dataset is LeRobot v3 format."""
+    info_path = f"{root_path}/meta/info.json"
+    if not fs.exists(info_path):
         raise FileNotFoundError(f"Not a LeRobot v3 dataset — missing {info_path}")
-
-    info = json.loads(info_path.read_text())
+    
+    with fs.open(info_path, "r") as f:
+        info = json.load(f)
+    
     version = info.get("codebase_version", "")
     if not version.startswith("v3"):
         raise ValueError(
@@ -177,39 +161,49 @@ def _assert_lerobot_v3(root: Path) -> None:
             "Migrate with: lerobot-convert-dataset --raw-dir . --out-dir ./v3"
         )
 
+def _read_info(fs: fsspec.AbstractFileSystem, root_path: str) -> dict[str, Any]:
+    """Read meta/info.json from the dataset."""
+    info_path = f"{root_path}/meta/info.json"
+    with fs.open(info_path, "r") as f:
+        return json.load(f)
 
-def _read_info(root: Path) -> dict[str, Any]:
-    return json.loads((root / "meta" / "info.json").read_text())
-
-
-def _read_episodes_meta(root: Path, info: dict[str, Any]) -> pd.DataFrame:
-    episodes_path = root / "meta" / "episodes.jsonl"
-    if episodes_path.exists():
-        df = pd.read_json(episodes_path, lines=True)
+def _read_episodes_meta(fs: fsspec.AbstractFileSystem, root_path: str, info: dict[str, Any]) -> pd.DataFrame:
+    """Read episode metadata from various possible locations."""
+    episodes_path = f"{root_path}/meta/episodes.jsonl"
+    if fs.exists(episodes_path):
+        with fs.open(episodes_path, "r") as f:
+            df = pd.read_json(f, lines=True)
         if not df.empty:
             return df
 
-    episodes_dir = root / "meta" / "episodes"
-    if episodes_dir.is_dir():
-        frames = [
-            pd.read_parquet(p)
-            for p in sorted(episodes_dir.glob("*.parquet"))
-        ]
-        if frames:
-            return pd.concat(frames, ignore_index=True)
+    episodes_dir = f"{root_path}/meta/episodes"
+    if fs.exists(episodes_dir) and fs.isdir(episodes_dir):
+        parquet_files = sorted([p for p in fs.ls(episodes_dir, detail=False) if p.endswith(".parquet")])
+        if parquet_files:
+            frames = []
+            for pf in parquet_files:
+                with fs.open(pf, "rb") as f:
+                    frames.append(pd.read_parquet(f))
+            if frames:
+                return pd.concat(frames, ignore_index=True)
 
-    data_dir = root / "data"
-    if data_dir.exists():
-        parquet_files = sorted(data_dir.glob("**/*.parquet"))
+    data_dir = f"{root_path}/data"
+    if fs.exists(data_dir):
+        parquet_files = sorted([p for p in fs.find(data_dir) if p.endswith(".parquet")])
         for pf in parquet_files:
             try:
-                schema = pq.read_schema(pf)
+                with fs.open(pf, "rb") as f:
+                    schema = pq.read_schema(f)
                 if "episode_index" not in schema.names:
                     continue
+                
                 cols = ["episode_index"]
                 if "task_index" in schema.names:
                     cols.append("task_index")
-                df = pq.read_table(pf, columns=cols).to_pandas()
+                
+                with fs.open(pf, "rb") as f:
+                    df = pq.read_table(f, columns=cols).to_pandas()
+                
                 grouped = df.groupby("episode_index").size().reset_index(name="length")
                 if "task_index" in df.columns:
                     task_mode = (
@@ -218,6 +212,7 @@ def _read_episodes_meta(root: Path, info: dict[str, Any]) -> pd.DataFrame:
                         .reset_index()
                     )
                     grouped = grouped.merge(task_mode, on="episode_index")
+                
                 total_eps = info.get("total_episodes", len(grouped))
                 if len(grouped) >= total_eps * 0.8:
                     warnings.warn(
@@ -231,26 +226,28 @@ def _read_episodes_meta(root: Path, info: dict[str, Any]) -> pd.DataFrame:
                 continue
 
     raise FileNotFoundError(
-        f"Cannot locate episode metadata under {root / 'meta'}. "
+        f"Cannot locate episode metadata under {root_path}/meta. "
         "Expected meta/episodes.jsonl, meta/episodes/*.parquet, or a data/*.parquet "
         "file containing an episode_index column."
     )
 
-
-def _read_tasks_meta(root: Path) -> dict[int, str]:
-    tasks_jsonl = root / "meta" / "tasks.jsonl"
-    if tasks_jsonl.exists():
+def _read_tasks_meta(fs: fsspec.AbstractFileSystem, root_path: str) -> dict[int, str]:
+    """Read task metadata from various possible locations."""
+    tasks_jsonl = f"{root_path}/meta/tasks.jsonl"
+    if fs.exists(tasks_jsonl):
         try:
-            tasks_df = pd.read_json(tasks_jsonl, lines=True)
+            with fs.open(tasks_jsonl, "r") as f:
+                tasks_df = pd.read_json(f, lines=True)
             if not tasks_df.empty and "task_index" in tasks_df.columns and "task" in tasks_df.columns:
                 return dict(zip(tasks_df["task_index"], tasks_df["task"]))
         except ValueError:
             pass
 
-    tasks_parquet = root / "meta" / "tasks.parquet"
-    if tasks_parquet.exists():
+    tasks_parquet = f"{root_path}/meta/tasks.parquet"
+    if fs.exists(tasks_parquet):
         try:
-            tasks_df = pq.read_table(tasks_parquet).to_pandas().reset_index()
+            with fs.open(tasks_parquet, "rb") as f:
+                tasks_df = pq.read_table(f).to_pandas().reset_index()
             if "task_index" in tasks_df.columns:
                 task_col = next(
                     (c for c in tasks_df.columns if c not in ("task_index", "__index_level_0__")),
@@ -263,10 +260,14 @@ def _read_tasks_meta(root: Path) -> dict[int, str]:
         except Exception:
             pass
 
-    tasks_dir = root / "meta" / "tasks"
-    if tasks_dir.is_dir():
+    tasks_dir = f"{root_path}/meta/tasks"
+    if fs.exists(tasks_dir) and fs.isdir(tasks_dir):
         try:
-            frames = [pd.read_parquet(p) for p in sorted(tasks_dir.glob("*.parquet"))]
+            parquet_files = sorted([p for p in fs.ls(tasks_dir, detail=False) if p.endswith(".parquet")])
+            frames = []
+            for p in parquet_files:
+                with fs.open(p, "rb") as f:
+                    frames.append(pd.read_parquet(f))
             if frames:
                 tasks_df = pd.concat(frames, ignore_index=True)
                 if "task_index" in tasks_df.columns and "task" in tasks_df.columns:
@@ -277,6 +278,7 @@ def _read_tasks_meta(root: Path) -> dict[int, str]:
     return {}
 
 def _infer_tasks_from_episodes(episodes_meta: pd.DataFrame) -> dict[int, str]:
+    """Infer task labels from episode metadata if tasks.jsonl is missing."""
     if "task" in episodes_meta.columns:
         unique_tasks = episodes_meta["task"].dropna().unique()
         if len(unique_tasks) > 0:
@@ -308,8 +310,8 @@ def _infer_tasks_from_episodes(episodes_meta: pd.DataFrame) -> dict[int, str]:
 
     return {0: "unspecified"}
 
-
 def _warn_missing_success_flags(episodes: tuple[EpisodeManifest, ...]) -> None:
+    """Warn if no success flags are present in any episode."""
     if all(e.success is None for e in episodes):
         warnings.warn(
             "No success flags found in any episode. "
@@ -319,18 +321,19 @@ def _warn_missing_success_flags(episodes: tuple[EpisodeManifest, ...]) -> None:
             stacklevel=3,
         )
 
-
 def _build_episode_manifest(
-    root: Path,
+    fs: fsspec.AbstractFileSystem,
+    root_path: str,
     ep_row: pd.Series,
     info: dict[str, Any],
     tasks_meta: dict[int, str],
 ) -> EpisodeManifest:
+    """Build an EpisodeManifest for a single episode."""
     episode_index: int = int(ep_row["episode_index"])
     frame_count: int = int(ep_row.get("length", ep_row.get("num_frames", 0)))
     fps: int = int(info["fps"])
     duration_s: float = frame_count / fps if fps > 0 else 0.0
-
+    
     task_index = ep_row.get("task_index", None)
     if task_index is not None and int(task_index) in tasks_meta:
         task = tasks_meta[int(task_index)]
@@ -346,11 +349,13 @@ def _build_episode_manifest(
         success = bool(ep_row["success"])
 
     quality = _classify_quality(duration_s, frame_count)
-    camera_sync_score = _compute_sync_score(root, episode_index, fps)
-    metrics = _compute_custom_metrics(root, episode_index)
+    camera_sync_score = _compute_sync_score(fs, root_path, episode_index, fps)
+    metrics = _compute_custom_metrics(fs, root_path, episode_index)
     robot_type = info.get("robot_type", ep_row.get("robot_type", "unknown"))
+    
     source_hash = _compute_episode_hash(
-        root,
+        fs,
+        root_path,
         episode_index,
         manifest_fields={
             "task": task,
@@ -361,6 +366,7 @@ def _build_episode_manifest(
             "robot_type": str(robot_type),
         },
     )
+    
     modalities = tuple(sorted(info.get("features", {}).keys()))
 
     _excluded = {
@@ -389,20 +395,24 @@ def _build_episode_manifest(
         metrics=metrics,
     )
 
-
-def _load_episode_frames(root: Path, episode_index: int) -> pd.DataFrame | None:
+def _load_episode_frames(fs: fsspec.AbstractFileSystem, root_path: str, episode_index: int) -> pd.DataFrame | None:
     """Load all per-frame rows for one episode from the data Parquet files."""
-    data_dir = root / "data"
-    if not data_dir.exists():
+    data_dir = f"{root_path}/data"
+    if not fs.exists(data_dir):
         return None
-    for pf in sorted(data_dir.glob("**/*.parquet")):
+    
+    parquet_files = sorted([p for p in fs.find(data_dir) if p.endswith(".parquet")])
+    for pf in parquet_files:
         try:
-            schema = pq.read_schema(pf)
+            with fs.open(pf, "rb") as f:
+                schema = pq.read_schema(f)
             if "episode_index" not in schema.names:
                 continue
-            table = pq.read_table(
-                pf, filters=[("episode_index", "=", episode_index)]
-            )
+            
+            with fs.open(pf, "rb") as f:
+                table = pq.read_table(
+                    f, filters=[("episode_index", "=", episode_index)]
+                )
             if table.num_rows == 0:
                 continue
             return table.to_pandas()
@@ -410,13 +420,15 @@ def _load_episode_frames(root: Path, episode_index: int) -> pd.DataFrame | None:
             continue
     return None
 
-
-def _compute_custom_metrics(root: Path, episode_index: int) -> dict[str, float]:
+def _compute_custom_metrics(fs: fsspec.AbstractFileSystem, root_path: str, episode_index: int) -> dict[str, float]:
+    """Compute all registered custom quality metrics for an episode."""
     if not QUALITY_METRICS:
         return {}
-    df = _load_episode_frames(root, episode_index)
+    
+    df = _load_episode_frames(fs, root_path, episode_index)
     if df is None or df.empty:
         return {}
+    
     out: dict[str, float] = {}
     for name, fn in QUALITY_METRICS.items():
         try:
@@ -427,40 +439,43 @@ def _compute_custom_metrics(root: Path, episode_index: int) -> dict[str, float]:
             out[name] = round(float(value), 4)
     return out
 
-
 def _is_na(v: object) -> bool:
+    """Check if a value is NaN/None."""
     if isinstance(v, (list, dict)):
         return False
     try:
-        return bool(pd.isna(v))  # type: ignore[arg-type]
+        return bool(pd.isna(v))
     except (TypeError, ValueError):
         return False
 
-
 def _classify_quality(duration_s: float, frame_count: int) -> EpisodeQuality:
+    """Classify episode quality based on duration and frame count."""
     if frame_count == 0 or duration_s < _MIN_EPISODE_DURATION_S:
         return EpisodeQuality.corrupted
     if duration_s < _MIN_EPISODE_DURATION_S * 2:
         return EpisodeQuality.partial
     return EpisodeQuality.complete
 
-
-def _compute_sync_score(root: Path, episode_index: int, fps: int) -> float:
-    data_dir = root / "data"
-    if not data_dir.exists():
+def _compute_sync_score(fs: fsspec.AbstractFileSystem, root_path: str, episode_index: int, fps: int) -> float:
+    """Compute camera synchronization score for an episode."""
+    data_dir = f"{root_path}/data"
+    if not fs.exists(data_dir):
         return 1.0
-
-    parquet_files = sorted(data_dir.glob("**/*.parquet"))
+    
+    parquet_files = sorted([p for p in fs.find(data_dir) if p.endswith(".parquet")])
     if not parquet_files:
         return 1.0
 
-    target_file: Path | None = None
+    target_file: str | None = None
     for pf in parquet_files:
         try:
-            schema = pq.read_schema(pf)
+            with fs.open(pf, "rb") as f:
+                schema = pq.read_schema(f)
             if "episode_index" not in schema.names:
                 continue
-            ep_col = pq.read_table(pf, columns=["episode_index"]).to_pandas()
+            
+            with fs.open(pf, "rb") as f:
+                ep_col = pq.read_table(f, columns=["episode_index"]).to_pandas()
             if episode_index in ep_col["episode_index"].values:
                 target_file = pf
                 break
@@ -471,11 +486,12 @@ def _compute_sync_score(root: Path, episode_index: int, fps: int) -> float:
         return 1.0
 
     try:
-        df = pq.read_table(
-            target_file,
-            filters=[("episode_index", "=", episode_index)],
-            columns=["episode_index", "timestamp"],
-        ).to_pandas()
+        with fs.open(target_file, "rb") as f:
+            df = pq.read_table(
+                f,
+                filters=[("episode_index", "=", episode_index)],
+                columns=["episode_index", "timestamp"],
+            ).to_pandas()
     except Exception:
         return 1.0
 
@@ -504,27 +520,28 @@ def _compute_sync_score(root: Path, episode_index: int, fps: int) -> float:
     drift_ratio = relative_drift / 0.5
     return round(float(1.0 - drift_ratio * (1.0 - _SYNC_SCORE_DEGRADED)), 4)
 
-
 def _compute_episode_hash(
-    root: Path,
+    fs: fsspec.AbstractFileSystem,
+    root_path: str,
     episode_index: int,
     manifest_fields: dict[str, Any] | None = None,
 ) -> str:
+    """Compute a content-addressed hash for an episode."""
     h = hashlib.sha256()
     h.update(str(episode_index).encode())
-
-    # Fold in distinguishing manifest fields (task label, success, etc.) so
-    # that episodes with identical frame data but different metadata still
-    # produce distinct content-addressed hashes.
+    
     if manifest_fields:
         h.update(
             json.dumps(manifest_fields, sort_keys=True, default=str).encode()
         )
 
-    data_dir = root / "data"
-    for pf in sorted(data_dir.glob("**/*.parquet")) if data_dir.exists() else []:
+    data_dir = f"{root_path}/data"
+    parquet_files = sorted([p for p in fs.find(data_dir) if p.endswith(".parquet")]) if fs.exists(data_dir) else []
+    
+    for pf in parquet_files:
         try:
-            schema = pq.read_schema(pf)
+            with fs.open(pf, "rb") as f:
+                schema = pq.read_schema(f)
             if "episode_index" not in schema.names:
                 continue
 
@@ -534,15 +551,16 @@ def _compute_episode_hash(
                     sample_cols.append(col)
                     break
 
-            table = pq.read_table(
-                pf,
-                filters=[("episode_index", "=", episode_index)],
-                columns=sample_cols,
-            )
+            with fs.open(pf, "rb") as f:
+                table = pq.read_table(
+                    f,
+                    filters=[("episode_index", "=", episode_index)],
+                    columns=sample_cols,
+                )
             if table.num_rows == 0:
                 continue
 
-            h.update(pf.name.encode())
+            h.update(pf.split("/")[-1].encode())
             h.update(str(table.num_rows).encode())
 
             df = table.to_pandas()

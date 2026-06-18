@@ -519,7 +519,7 @@ def _render_html_report(d: EpisodeDiff, anomalies: tuple[EpisodeAnomaly, ...] = 
     hint_html = ""
     if d.regression_hint:
         items = "".join(f"<li>{html.escape(c)}</li>" for c in d.regression_hint.split("\n"))
-        hint_html = f'<h2>Regression candidates</h2><ul class="hints">{items}</ul>'
+        hint_html = f'<h2>idates</h2><ul class="hints">{items}</ul>'
 
     metric_chart = _svg_bar_chart(metric_pairs, "Custom quality metrics") if metric_pairs else ""
 
