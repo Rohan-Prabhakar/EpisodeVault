@@ -16,4 +16,8 @@ __all__ = [
     "EpisodeQuality",
 ]
 
-__version__ = "0.1.1"
+try:
+    from importlib.metadata import version
+    __version__ = version("episodevault")
+except Exception:
+    __version__ = "0.2.2"
