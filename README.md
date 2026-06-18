@@ -1,4 +1,4 @@
-# EpisodeVault -- find out exactly why your robot model regressed.
+# EpisodeVault: find out exactly why your robot model regressed.
 
 [![PyPI](https://img.shields.io/pypi/v/episodevault)](https://pypi.org/project/episodevault/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -94,7 +94,7 @@ episodevault diff v1.0 v2.0 s3://my-robotics-bucket/datasets/v1
 
 # Run anomaly detection on a cloud dataset
 episodevault anomalies gs://my-gcs-bucket/datasets/v2
-"
+
 ```
 
 ## Python API
