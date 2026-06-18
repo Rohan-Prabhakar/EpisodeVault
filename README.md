@@ -80,6 +80,23 @@ episodevault blame model_v3
 `track` initializes a `.episodevault/` store inside your dataset directory. `commit` snapshots the episode manifest (not raw sensor data -- fast). `diff` computes task distribution shift and quality deltas between any two versions. `blame` looks up which dataset version trained a given model and diffs it against the version before.
 
 
+## Cloud-Native Storage (S3, GCS, Azure)
+
+EpisodeVault doesn't need to download terabytes of video to diff your dataset. It reads metadata directly from cloud object storage using `fsspec`. You can track, commit, and diff datasets stored in AWS S3, Google Cloud Storage, or Azure Blob Storage without pulling the raw sensor data to your local machine.
+
+```bash
+# Track and commit a dataset directly in AWS S3
+episodevault track s3://my-robotics-bucket/datasets/v1
+episodevault commit s3://my-robotics-bucket/datasets/v1 -m "initial cloud snapshot"
+
+# Diff two versions stored in the cloud
+episodevault diff v1.0 v2.0 s3://my-robotics-bucket/datasets/v1
+
+# Run anomaly detection on a cloud dataset
+episodevault anomalies gs://my-gcs-bucket/datasets/v2
+"
+```
+
 ## Python API
 
 Log a training run from your training script so `blame` can trace it back:
@@ -201,7 +218,7 @@ Parse time is for the episode manifest only. Raw sensor data (video, joint traje
 - Parses episode manifests (`meta/episodes/`, `meta/tasks.parquet`, `meta/info.json`) without loading raw sensor data -- sub-second parse regardless of frame count or video size.
 - Snapshots manifests into a version store on every `commit` -- diff and time travel are built in from the start.
 - Diff engine computes task distribution shift and quality deltas between any two snapshots -- regression candidates are ranked by a normalized severity score and the top few are surfaced, not asserted as proven causes.
-
+- **Cloud-native:** Uses `fsspec` to read metadata directly from S3, GCS, and Azure. It only pulls the tiny Parquet manifests over the network, keeping cloud egress costs and latency near zero.
 
 
 ## Credits
