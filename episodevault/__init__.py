@@ -16,7 +16,6 @@ __all__ = [
     "EpisodeQuality",
 ]
 
-<<<<<<< HEAD
 try:
     from importlib.metadata import version
     __version__ = version("episodevault")
