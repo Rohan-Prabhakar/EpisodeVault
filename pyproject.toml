@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "episodevault"
-version = "0.2.1"
+version = "0.2.2"
 description = "Version control and lineage tracking for robot training episode data"
 readme = "README.md"
 license = { text = "MIT" }
