@@ -67,7 +67,7 @@ class EpisodeDiff:
         lines.append("Distribution shift:")
 
         for td in sorted(self.task_deltas, key=lambda x: abs(x.pct_change), reverse=True):
-            direction = "↓" if td.pct_change < 0 else "↑"
+            direction = "↓" if td.pct_change < 0 else ("-" if td.pct_change == 0 else "↑")
             flag = "  ⚠️" if td.flagged else ""
             lines.append(
                 f"  {td.task[:32]:<32} "
@@ -79,14 +79,14 @@ class EpisodeDiff:
         lines.append("Quality metrics:")
         qd = self.quality_delta
 
-        dur_dir = "↓" if qd.avg_duration_s_after < qd.avg_duration_s_before else "↑"
+        dur_dir = "↓" if qd.avg_duration_s_after < qd.avg_duration_s_before else ("-" if qd.avg_duration_s_after == qd.avg_duration_s_before else "↑")
         lines.append(
             f"  avg episode length:    "
             f"{qd.avg_duration_s_before:.1f}s → {qd.avg_duration_s_after:.1f}s  {dur_dir}"
         )
 
         if qd.success_rate_before is not None and qd.success_rate_after is not None:
-            sr_dir = "↓" if qd.success_rate_after < qd.success_rate_before else "↑"
+            sr_dir = "↓" if qd.success_rate_after < qd.success_rate_before else ("-" if qd.success_rate_after == qd.success_rate_before else "↑")
             lines.append(
                 f"  success_rate:          "
                 f"{qd.success_rate_before:.2f} → {qd.success_rate_after:.2f}  {sr_dir}"
@@ -97,7 +97,7 @@ class EpisodeDiff:
                 "⚠️  add success flags to episodes for regression analysis"
             )
 
-        sync_dir = "↓" if qd.avg_sync_score_after < qd.avg_sync_score_before else "↑"
+        sync_dir = "↓" if qd.avg_sync_score_after < qd.avg_sync_score_before else ("-" if qd.avg_sync_score_after == qd.avg_sync_score_before else "↑")
         lines.append(
             f"  camera_sync_score:     "
             f"{qd.avg_sync_score_before:.2f} → {qd.avg_sync_score_after:.2f}  {sync_dir}"
@@ -116,7 +116,7 @@ class EpisodeDiff:
                 before = "n/a" if md.avg_before is None else f"{md.avg_before:.3f}"
                 after = "n/a" if md.avg_after is None else f"{md.avg_after:.3f}"
                 if md.avg_before is not None and md.avg_after is not None:
-                    arrow = "↓" if md.avg_after < md.avg_before else "↑"
+                    arrow = "↓" if md.avg_after < md.avg_before else ("-" if md.avg_after == md.avg_before else "↑")
                 else:
                     arrow = " "
                 lines.append(f"  {md.name[:28]:<28} {before} → {after}  {arrow}")
@@ -519,7 +519,7 @@ def _render_html_report(d: EpisodeDiff, anomalies: tuple[EpisodeAnomaly, ...] = 
     hint_html = ""
     if d.regression_hint:
         items = "".join(f"<li>{html.escape(c)}</li>" for c in d.regression_hint.split("\n"))
-        hint_html = f'<h2>idates</h2><ul class="hints">{items}</ul>'
+        hint_html = f'<h2>Regression candidates</h2><ul class="hints">{items}</ul>'
 
     metric_chart = _svg_bar_chart(metric_pairs, "Custom quality metrics") if metric_pairs else ""
 
@@ -568,8 +568,8 @@ def _render_html_report(d: EpisodeDiff, anomalies: tuple[EpisodeAnomaly, ...] = 
 </style></head><body>
 <h1>Dataset diff — {html.escape(d.version_before)} → {html.escape(d.version_after)}</h1>
 <div class="summary">
- <div><b>+{d.episodes_added}</b>episodes added</div>
- <div><b>-{d.episodes_removed}</b>episodes removed</div>
+ <div><b>+{d.episodes_added}</b> episodes added</div>
+ <div><b>-{d.episodes_removed}</b> episodes removed</div>
 </div>
 <p class="legend"><span><i style="background:#9aa5c4"></i>before</span><span><i style="background:#4361ee"></i>after</span></p>
 {version_graph_html}
